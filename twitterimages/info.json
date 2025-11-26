@@ -1,12 +1,10 @@
 {
-    "author": [
-        "poop"
-    ],
-    "install_msg": "TwitterImages auto-scraper installed.",
+    "author" : ["funny"],
+    "install_msg" : "TwitterImages auto-scraper installed.",
     "short": "Automatic Twitter image scraping.",
+    "name" : "twitterimages",
+    "short" : "Allows admins to reply to ahelps from discord.",
     "description": "Scrapes images from a Twitter account over time and serves random images via !scran.",
-    "name": "twitterimages",
-    "hidden": false,
     "requirements": [
         "requests"
     ],
