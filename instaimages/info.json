@@ -1,0 +1,16 @@
+{
+    "author" : ["funny"],
+    "install_msg" : "InstaImages auto-scraper installed.",
+    "short": "Automatic Instagram image scraping.",
+    "name" : "instaimages",
+    "short" : "pooajdishj.",
+    "description": "Scrapes images from an Instagram account over time and serves random images via !scran.",
+    "requirements": [
+        "requests"
+    ],
+    "tags": [
+        "instagram",
+        "images",
+        "scraper"
+    ]
+}
