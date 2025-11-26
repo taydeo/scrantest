@@ -5,7 +5,7 @@ import aiohttp
 import random
 import logging
 import time
-import os
+import re
 
 class TwitterImages(commands.Cog):
     """Pull latest images from a Twitter account."""
@@ -16,178 +16,191 @@ class TwitterImages(commands.Cog):
         default_guild = {"twitter_username": None, "cached_images": []}
         self.config.register_guild(**default_guild)
         
-        # Set up logger
         self.logger = logging.getLogger('red.TwitterImages')
         self.last_run_time = None
         
-        # Twitter API Bearer Token - set this in your Redbot credentials
-        self.bearer_token = None
-        
         self.scrape_task = bot.loop.create_task(self.scrape_loop())
 
-    async def initialize(self):
-        """Initialize Twitter API token"""
-        self.bearer_token = await self.bot.get_shared_api_tokens("twitter")
-        if not self.bearer_token.get("bearer_token"):
-            self.logger.warning("Twitter Bearer Token not set! Use [p]set api twitter bearer_token,YOUR_TOKEN")
-
-    async def fetch_images_v2(self, username: str, count: int = 20):
-        """Use Twitter API v2 to fetch images"""
-        if not self.bearer_token:
-            await self.initialize()
-            
-        bearer_token = self.bearer_token.get("bearer_token") if self.bearer_token else None
-        if not bearer_token:
-            self.logger.error("Twitter API bearer token not configured")
-            return []
-
-        # First, get user ID from username
-        user_url = f"https://api.twitter.com/2/users/by/username/{username}"
-        headers = {"Authorization": f"Bearer {bearer_token}"}
-        
+    async def fetch_images_direct_embed(self, username: str, count: int = 20):
+        """Try to extract images from Twitter embed API"""
         try:
+            # Use Twitter's oEmbed API which sometimes works without authentication
+            embed_url = f"https://publish.twitter.com/oembed?url=https://twitter.com/{username}&omit_script=1"
+            
             async with aiohttp.ClientSession() as session:
-                # Get user ID
-                async with session.get(user_url, headers=headers) as response:
-                    if response.status != 200:
-                        self.logger.error(f"Error getting user ID: {response.status}")
-                        return []
-                    
-                    user_data = await response.json()
-                    user_id = user_data.get('data', {}).get('id')
-                    if not user_id:
-                        self.logger.error(f"User {username} not found")
-                        return []
-
-                # Get tweets with media
-                timeline_url = f"https://api.twitter.com/2/users/{user_id}/tweets"
-                params = {
-                    'max_results': min(count, 100),
-                    'expansions': 'attachments.media_keys',
-                    'tweet.fields': 'attachments,created_at',
-                    'media.fields': 'url,type,preview_image_url'
-                }
-                
-                async with session.get(timeline_url, headers=headers, params=params) as response:
-                    if response.status != 200:
-                        self.logger.error(f"Error getting tweets: {response.status}")
-                        return []
-                    
-                    data = await response.json()
-                    
-                    images = []
-                    media_dict = {}
-                    
-                    # Build media lookup
-                    for media in data.get('includes', {}).get('media', []):
-                        if media.get('type') == 'photo' and media.get('url'):
-                            media_dict[media['media_key']] = media['url']
-                    
-                    # Find tweets with images
-                    for tweet in data.get('data', []):
-                        attachments = tweet.get('attachments', {})
-                        media_keys = attachments.get('media_keys', [])
-                        for key in media_keys:
-                            if key in media_dict:
-                                images.append(media_dict[key])
-                    
-                    self.logger.info(f"API v2 fetched {len(images)} images for {username}")
-                    return images
-                    
+                async with session.get(embed_url, timeout=10) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        html = data.get('html', '')
+                        
+                        # Extract image URLs from the HTML
+                        image_urls = re.findall(r'https://pbs\.twimg\.com/media/[^\s"\']+', html)
+                        if image_urls:
+                            return list(set(image_urls))[:count]
+            
+            # Try mobile Twitter
+            mobile_url = f"https://mobile.twitter.com/{username}"
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1'
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(mobile_url, headers=headers, timeout=10) as response:
+                    if response.status == 200:
+                        html = await response.text()
+                        # Look for image patterns in mobile site
+                        image_urls = re.findall(r'https://pbs\.twimg\.com/media/[^\s"\']+', html)
+                        image_urls.extend(re.findall(r'https://pbs\.twimg\.com/profile_images/[^\s"\']+', html))
+                        image_urls.extend(re.findall(r'https://pbs\.twimg\.com/ext_tw_video_thumb/[^\s"\']+', html))
+                        
+                        if image_urls:
+                            return list(set(image_urls))[:count]
+                            
         except Exception as e:
-            self.logger.error(f"Error in Twitter API v2: {str(e)}")
-            return []
+            self.logger.debug(f"Direct embed method failed: {str(e)}")
+            
+        return []
 
-    async def fetch_images_nitter(self, username: str, count: int = 20):
-        """Use Nitter instance as fallback (unofficial, no API key needed)"""
-        # Try different Nitter instances
-        instances = [
-            "https://nitter.net",
-            "https://nitter.privacydev.net", 
-            "https://nitter.poast.org",
-            "https://nitter.fly.dev"
+    async def fetch_images_twitter_api_guest(self, username: str, count: int = 20):
+        """Try to use Twitter's guest token API"""
+        try:
+            # First get a guest token
+            async with aiohttp.ClientSession() as session:
+                # Get guest token
+                async with session.post('https://api.twitter.com/1.1/guest/activate.json', 
+                                      headers={'Authorization': 'Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA'}) as response:
+                    if response.status == 200:
+                        token_data = await response.json()
+                        guest_token = token_data.get('guest_token')
+                        
+                        if guest_token:
+                            # Use the guest token to fetch user timeline
+                            timeline_url = f"https://api.twitter.com/2/timeline/profile/{username}.json"
+                            params = {
+                                'count': count,
+                                'include_entities': 1
+                            }
+                            headers = {
+                                'Authorization': 'Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA',
+                                'x-guest-token': guest_token
+                            }
+                            
+                            async with session.get(timeline_url, headers=headers, params=params, timeout=10) as response:
+                                if response.status == 200:
+                                    data = await response.json()
+                                    images = []
+                                    
+                                    # Parse the complex Twitter response
+                                    tweets = data.get('globalObjects', {}).get('tweets', {})
+                                    for tweet_id, tweet in tweets.items():
+                                        entities = tweet.get('entities', {})
+                                        media_list = entities.get('media', [])
+                                        for media in media_list:
+                                            if media.get('type') == 'photo':
+                                                images.append(media.get('media_url_https'))
+                                    
+                                    if images:
+                                        return images[:count]
+                                        
+        except Exception as e:
+            self.logger.debug(f"Twitter guest API failed: {str(e)}")
+            
+        return []
+
+    async def fetch_images_alternative_rss(self, username: str, count: int = 20):
+        """Try alternative RSS services"""
+        rss_services = [
+            f"https://twiiit.com/rss/{username}",
+            f"https://rss.app/twitter-user/{username}",
+            f"https://api.rss2json.com/v1/api.json?rss_url=https://twitrss.me/twitter_user_to_rss/?user={username}",
         ]
         
-        for instance in instances:
+        for service_url in rss_services:
             try:
-                url = f"{instance}/{username}/media"
                 headers = {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
                 }
                 
                 async with aiohttp.ClientSession() as session:
-                    async with session.get(url, headers=headers, timeout=10) as response:
+                    async with session.get(service_url, headers=headers, timeout=10) as response:
                         if response.status == 200:
-                            html = await response.text()
-                            
-                            # Simple parsing for image URLs in the HTML
-                            import re
-                            # Look for image URLs in the media page
-                            pattern = r'https://pbs\.twimg\.com/media/[^\s"\']+'
-                            images = re.findall(pattern, html)
-                            
-                            # Remove duplicates and return
-                            unique_images = list(set(images))[:count]
-                            if unique_images:
-                                self.logger.info(f"Nitter fetched {len(unique_images)} images from {instance}")
-                                return unique_images
+                            text = await response.text()
+                            # Look for Twitter image URLs
+                            image_urls = re.findall(r'https://pbs\.twimg\.com/media/[^\s"\']+', text)
+                            if image_urls:
+                                return list(set(image_urls))[:count]
                                 
             except Exception as e:
-                self.logger.debug(f"Nitter instance {instance} failed: {str(e)}")
+                self.logger.debug(f"RSS service {service_url} failed: {str(e)}")
                 continue
                 
-        self.logger.warning(f"No Nitter instances worked for {username}")
         return []
 
-    async def fetch_images_rss(self, username: str, count: int = 20):
-        """Try RSS feed approach"""
+    async def fetch_images_web_scraping(self, username: str, count: int = 20):
+        """Try direct web scraping of Twitter profile"""
         try:
-            url = f"https://twitrss.me/twitter_user_to_rss/?user={username}"
+            url = f"https://twitter.com/{username}"
             headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
             }
             
             async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=headers, timeout=10) as response:
+                async with session.get(url, headers=headers, timeout=15) as response:
                     if response.status == 200:
-                        text = await response.text()
+                        html = await response.text()
                         
-                        # Parse RSS for image links
-                        import re
-                        # Look for image URLs in the RSS content
-                        images = re.findall(r'https://pbs\.twimg\.com/media/[^<"\']+', text)
-                        unique_images = list(set(images))[:count]
+                        # Try to find images in the HTML
+                        image_urls = []
                         
-                        if unique_images:
-                            self.logger.info(f"RSS fetched {len(unique_images)} images")
-                            return unique_images
+                        # Look for various Twitter image patterns
+                        patterns = [
+                            r'https://pbs\.twimg\.com/media/[^\s"\']+',
+                            r'https://pbs\.twimg\.com/profile_images/[^\s"\']+',
+                            r'https://pbs\.twimg\.com/ext_tw_video_thumb/[^\s"\']+',
+                            r'https://pbs\.twimg\.com/amplify_video_thumb/[^\s"\']+',
+                        ]
+                        
+                        for pattern in patterns:
+                            found = re.findall(pattern, html)
+                            image_urls.extend(found)
+                        
+                        if image_urls:
+                            unique_images = list(set(image_urls))
+                            self.logger.info(f"Web scraping found {len(unique_images)} images")
+                            return unique_images[:count]
                             
         except Exception as e:
-            self.logger.debug(f"RSS method failed: {str(e)}")
+            self.logger.debug(f"Web scraping failed: {str(e)}")
             
         return []
 
     async def fetch_images(self, username: str, count: int = 20):
-        """Try multiple methods to fetch images"""
-        self.logger.info(f"Attempting to fetch images for {username} using multiple methods...")
+        """Try ALL methods to fetch images"""
+        self.logger.info(f"Attempting to fetch images for {username} using ALL methods...")
         
-        # Method 1: Twitter API v2 (if configured)
-        images = await self.fetch_images_v2(username, count)
-        if images:
-            return images
+        methods = [
+            ("Web Scraping", self.fetch_images_web_scraping),
+            ("Direct Embed", self.fetch_images_direct_embed),
+            ("Twitter Guest API", self.fetch_images_twitter_api_guest),
+            ("Alternative RSS", self.fetch_images_alternative_rss),
+        ]
+        
+        for method_name, method_func in methods:
+            try:
+                self.logger.info(f"Trying {method_name}...")
+                images = await method_func(username, count)
+                if images:
+                    self.logger.info(f"✅ {method_name} succeeded with {len(images)} images")
+                    return images
+                else:
+                    self.logger.info(f"❌ {method_name} found no images")
+            except Exception as e:
+                self.logger.warning(f"Method {method_name} failed: {str(e)}")
             
-        # Method 2: Nitter fallback
-        self.logger.info("Twitter API failed, trying Nitter...")
-        images = await self.fetch_images_nitter(username, count)
-        if images:
-            return images
-            
-        # Method 3: RSS fallback  
-        self.logger.info("Nitter failed, trying RSS...")
-        images = await self.fetch_images_rss(username, count)
-        if images:
-            return images
-            
+            await asyncio.sleep(1)  # Brief pause between methods
+        
         self.logger.error(f"All methods failed for {username}")
         return []
 
@@ -199,19 +212,26 @@ class TwitterImages(commands.Cog):
 
     @twitterset.command()
     async def username(self, ctx, username: str):
+        # Remove @ if present
+        username = username.lstrip('@')
         await self.config.guild(ctx.guild).twitter_username.set(username)
         await ctx.send(f"Twitter username set to `{username}`.")
         self.logger.info(f"Twitter username set to {username} in guild {ctx.guild.id}")
         
         # Try to immediately fetch images
         try:
-            await ctx.send("🔄 Attempting to fetch images...")
+            await ctx.send("🔄 Attempting to fetch images using multiple methods...")
             imgs = await self.fetch_images(username, 20)
             if imgs:
                 await self.config.guild(ctx.guild).cached_images.set(imgs)
                 await ctx.send(f"✅ Successfully cached {len(imgs)} images!")
+                # Show a sample
+                if len(imgs) > 0:
+                    embed = discord.Embed(title="Sample Image")
+                    embed.set_image(url=imgs[0])
+                    await ctx.send(embed=embed)
             else:
-                await ctx.send("❌ No images found using any method. The account might not exist or have no images.")
+                await ctx.send("❌ No images found using any method. The account might be private, have no images, or all methods are currently blocked.")
         except Exception as e:
             self.logger.error(f"Error in immediate fetch: {str(e)}")
             await ctx.send("❌ Error fetching images.")
@@ -224,7 +244,6 @@ class TwitterImages(commands.Cog):
         if not cached:
             self.logger.warning(f"Cache empty for {username} in guild {ctx.guild.id}")
             
-            # Try to fetch immediately
             if username:
                 await ctx.send("🔄 Cache empty, attempting to fetch images now...")
                 imgs = await self.fetch_images(username, 20)
@@ -233,7 +252,7 @@ class TwitterImages(commands.Cog):
                     cached = imgs
                     await ctx.send(f"✅ Fetched {len(imgs)} images!")
                 else:
-                    return await ctx.send("❌ Could not fetch any images. The account might not exist or have no public images.")
+                    return await ctx.send("❌ Could not fetch any images. The account might be private or have restrictions.")
             else:
                 return await ctx.send("❌ No Twitter username set. Use `!twitterset username` first.")
         
@@ -320,26 +339,52 @@ class TwitterImages(commands.Cog):
         if not username:
             return await ctx.send("No Twitter username set.")
             
-        await ctx.send(f"🔍 Testing connection methods for `{username}`...")
+        await ctx.send(f"🔍 Testing ALL connection methods for `{username}`...")
         
-        # Test each method
         methods = [
-            ("Twitter API v2", self.fetch_images_v2),
-            ("Nitter", self.fetch_images_nitter),
-            ("RSS", self.fetch_images_rss)
+            ("Web Scraping", self.fetch_images_web_scraping),
+            ("Direct Embed", self.fetch_images_direct_embed),
+            ("Twitter Guest API", self.fetch_images_twitter_api_guest),
+            ("Alternative RSS", self.fetch_images_alternative_rss),
         ]
+        
+        results = []
         
         for method_name, method_func in methods:
             try:
                 await ctx.send(f"Testing **{method_name}**...")
                 images = await method_func(username, 5)
                 if images:
-                    await ctx.send(f"✅ {method_name}: Found {len(images)} images")
+                    result = f"✅ {method_name}: Found {len(images)} images"
                     if len(images) > 0:
-                        await ctx.send(f"Sample: {images[0]}")
+                        result += f"\nSample: {images[0][:50]}..."
+                    results.append(result)
                 else:
-                    await ctx.send(f"❌ {method_name}: No images found")
+                    results.append(f"❌ {method_name}: No images found")
             except Exception as e:
-                await ctx.send(f"❌ {method_name}: Error - {str(e)}")
+                results.append(f"❌ {method_name}: Error - {str(e)}")
             
             await asyncio.sleep(1)
+        
+        # Send summary
+        summary = "\n".join(results)
+        await ctx.send(f"**Debug Results:**\n{summary}")
+
+    @commands.command()
+    async def twitter_status(self, ctx):
+        """Check current Twitter image status."""
+        username = await self.config.guild(ctx.guild).twitter_username()
+        cached = await self.config.guild(ctx.guild).cached_images()
+        
+        if not username:
+            return await ctx.send("No Twitter username set.")
+        
+        embed = discord.Embed(title="Twitter Image Status", color=0x1DA1F2)
+        embed.add_field(name="Username", value=username, inline=True)
+        embed.add_field(name="Cached Images", value=len(cached) if cached else "0", inline=True)
+        embed.add_field(name="Last Scrape", value=f"<t:{int(self.last_run_time or time.time())}:R>" if self.last_run_time else "Never", inline=True)
+        
+        if cached:
+            embed.add_field(name="Sample Image", value=f"[View]({cached[0]})", inline=True)
+        
+        await ctx.send(embed=embed)
