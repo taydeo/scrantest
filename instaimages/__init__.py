@@ -1,4 +1,5 @@
-from .twitterimages import TwitterImages
+from .instaimages import InstagramImages
 
 async def setup(bot):
-    await bot.add_cog(TwitterImages(bot))
+    cog = InstagramImages(bot)
+    await bot.add_cog(cog)
