@@ -1,0 +1,18 @@
+{
+    "author": [
+        "poop"
+    ],
+    "install_msg": "TwitterImages auto-scraper installed.",
+    "short": "Automatic Twitter image scraping.",
+    "description": "Scrapes images from a Twitter account over time and serves random images via !scran.",
+    "name": "twitterimages",
+    "hidden": false,
+    "requirements": [
+        "requests"
+    ],
+    "tags": [
+        "twitter",
+        "images",
+        "scraper"
+    ]
+}
